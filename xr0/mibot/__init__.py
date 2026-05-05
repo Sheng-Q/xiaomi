@@ -1,4 +1,12 @@
 # Copyright (C) 2026 Xiaomi Corporation.
-from mibot.data import *  # noqa: F403
-from mibot.models import *  # noqa: F403
-from mibot.utils import *  # noqa: F403
+"""Top-level package for MiBot.
+
+Keep package import lightweight so runtime-only tools can import
+``mibot.server.runtime.client`` without pulling in the training stack
+and its optional dependencies (for example ``lightning``).
+
+Training and data symbols remain available from their explicit
+subpackages, such as ``mibot.models`` and ``mibot.data``.
+"""
+
+__all__: list[str] = []

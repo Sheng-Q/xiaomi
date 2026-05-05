@@ -170,13 +170,13 @@ def make_runtime_client(args: argparse.Namespace):
 def main() -> None:
     args = parse_args()
     robot = make_robot(args)
-    client = make_runtime_client(args)
-
-    print(
-        f"Connected robot={args.robot_id} can={args.can} top={args.top_camera} wrist={args.wrist_camera} "
-        f"-> xr0_server={args.host}:{args.port}"
-    )
+    client = None
     try:
+        client = make_runtime_client(args)
+        print(
+            f"Connected robot={args.robot_id} can={args.can} top={args.top_camera} wrist={args.wrist_camera} "
+            f"-> xr0_server={args.host}:{args.port}"
+        )
         for index in range(args.iterations):
             started = time.perf_counter()
             raw_observation = robot.get_observation()
@@ -200,7 +200,8 @@ def main() -> None:
             if index + 1 < args.iterations and args.sleep_s > 0:
                 time.sleep(args.sleep_s)
     finally:
-        client.close()
+        if client is not None:
+            client.close()
         robot.disconnect()
 
 

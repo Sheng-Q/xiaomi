@@ -1,6 +1,8 @@
 # Copyright (C) 2026 Xiaomi Corporation.
 from __future__ import annotations
 
+import importlib.util
+import os
 import pickle
 import socket
 import struct
@@ -12,6 +14,31 @@ from transformers import AutoProcessor
 from mibot.utils.io import compose_state, recover_action, resize_image, split_action
 
 
+def _has_socks_support() -> bool:
+    return importlib.util.find_spec("socksio") is not None
+
+
+def _normalize_httpx_proxy_env() -> None:
+    """Normalize proxy env vars so httpx can consume common local proxy configs.
+
+    Some desktop proxy tools export ``ALL_PROXY=socks://127.0.0.1:PORT``.
+    httpx rejects the ``socks://`` alias. If SOCKS support is installed, rewrite
+    it to ``socks5://``. Otherwise drop that variable and let HTTP(S)_PROXY win.
+    """
+
+    has_socks = _has_socks_support()
+    for key in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        value = os.environ.get(key)
+        if not value:
+            continue
+        if not value.startswith("socks://"):
+            continue
+        if has_socks:
+            os.environ[key] = "socks5://" + value[len("socks://") :]
+        else:
+            os.environ.pop(key, None)
+
+
 class Client:
     def __init__(
         self,
@@ -19,9 +46,10 @@ class Client:
         port: int = 50000,
         processor_name_or_path: str = "Qwen/Qwen3-VL-4B-Instruct",
     ) -> None:
-        self.socket = socket.create_connection((host, port))
+        _normalize_httpx_proxy_env()
         self.processor = AutoProcessor.from_pretrained(processor_name_or_path)
         self.processor.tokenizer.padding_side = "right"
+        self.socket = socket.create_connection((host, port))
 
     @staticmethod
     def _recv_all(sock, length):
@@ -69,8 +97,7 @@ class Client:
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
-            padding=True,
-            images_kwargs={"do_resize": False},
+            processor_kwargs={"images_kwargs": {"do_resize": False}, "padding": True},
         )
         payload["state"] = torch.from_numpy(
             compose_state(
