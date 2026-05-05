@@ -13,9 +13,14 @@ from mibot.utils.io import compose_state, recover_action, resize_image, split_ac
 
 
 class Client:
-    def __init__(self, host: str = "localhost", port: int = 50000) -> None:
+    def __init__(
+        self,
+        host: str = "localhost",
+        port: int = 50000,
+        processor_name_or_path: str = "Qwen/Qwen3-VL-4B-Instruct",
+    ) -> None:
         self.socket = socket.create_connection((host, port))
-        self.processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-4B-Instruct")
+        self.processor = AutoProcessor.from_pretrained(processor_name_or_path)
         self.processor.tokenizer.padding_side = "right"
 
     @staticmethod

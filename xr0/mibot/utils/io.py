@@ -184,14 +184,21 @@ def recover_action(action, robot_state: Mapping[str, np.ndarray]) -> dict[str, n
     targets = {}
 
     for side in ("left", "right"):
-        rotm = np.asarray(robot_state[f"{side}_ee_rotm"], dtype=np.float32).reshape(3, 3)
-        pos = np.asarray(robot_state[f"{side}_ee_pos"], dtype=np.float32).reshape(3)
         gripper = np.asarray(robot_state[f"{side}_gripper_pos"], dtype=np.float32).reshape(1)
         joint = np.asarray(robot_state[f"{side}_arm_joint"], dtype=np.float32).reshape(6)
 
-        targets[f"{side}_ee_pos"] = (pos[None] + parts[f"{side}_ee_pos"] @ rotm.T).astype(np.float32)
-        targets[f"{side}_ee_rotm"] = np.stack([rotm @ aa2rotm(delta) for delta in parts[f"{side}_ee_aa"]], axis=0).astype(np.float32)
         targets[f"{side}_gripper_pos"] = (gripper[None] + parts[f"{side}_gripper"]).astype(np.float32)
         targets[f"{side}_arm_joint"] = (joint[None] + parts[f"{side}_joint"]).astype(np.float32)
+
+        pos = robot_state.get(f"{side}_ee_pos")
+        rotm = robot_state.get(f"{side}_ee_rotm")
+        if pos is not None and rotm is not None:
+            pos = np.asarray(pos, dtype=np.float32).reshape(3)
+            rotm = np.asarray(rotm, dtype=np.float32).reshape(3, 3)
+            targets[f"{side}_ee_pos"] = (pos[None] + parts[f"{side}_ee_pos"] @ rotm.T).astype(np.float32)
+            targets[f"{side}_ee_rotm"] = np.stack(
+                [rotm @ aa2rotm(delta) for delta in parts[f"{side}_ee_aa"]],
+                axis=0,
+            ).astype(np.float32)
 
     return targets
