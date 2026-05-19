@@ -15,16 +15,17 @@ This package ports the useful parts of the legacy `tactile_ws` ROS driver into a
 
 ```text
 xr0/
-├── mibot/
-│   └── tactile/
-│       ├── __init__.py
-│       ├── types.py
-│       ├── protocol.py
-│       ├── driver.py
-│       ├── runtime.py
-│       └── visualizer.py
-├── tools/
-│   └── tactile_monitor.py
+|-- mibot/
+|   `-- tactile/
+|       |-- __init__.py
+|       |-- types.py
+|       |-- protocol.py
+|       |-- driver.py
+|       |-- runtime.py
+|       `-- visualizer.py
+`-- tools/
+    |-- tactile_monitor.py
+    `-- tactile_preview_server.py
 ```
 
 `mibot.tactile` is intentionally independent from XR0 model code. It can be used as a sidecar utility in robot control scripts without changing XR0's current 32-D state / action layout.
@@ -57,6 +58,31 @@ This will:
 - wait for frames and run zero-point calibration
 - print calibrated force values for `index_middle` and `middle_middle`
 - save a PNG heatmap and an NPZ snapshot every 30 frames
+
+## Live browser preview
+
+If you only want to observe the heatmap without saving files, run:
+
+```bash
+python tools/tactile_preview_server.py \
+  --port /dev/ttyACM0 \
+  --mode auto_push \
+  --calibrate
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8765
+```
+
+If the script runs on a remote server, you can forward the port to your local machine:
+
+```bash
+ssh -L 8765:127.0.0.1:8765 <user>@<server>
+```
+
+Then open `http://127.0.0.1:8765` in your local browser.
 
 ## Direct Python API
 
