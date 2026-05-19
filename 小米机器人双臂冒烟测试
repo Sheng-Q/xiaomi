@@ -1,0 +1,197 @@
+32 维映射
+  XR0 的 32 维不是 32 个关节，而是“左右臂的末端增量 + 夹爪增量 + 关节增量”的固定
+  槽位。定义在 桌面/Xiaomi-Robotics-0/xr0/mibot/utils/io.py:15：
+
+  - 0..2: left_ee_pos
+  - 3..5: left_ee_aa
+  - 6: left_gripper
+  - 7..12: left_joint
+  - 13: 保留位
+  - 14..16: right_ee_pos
+  - 17..19: right_ee_aa
+  - 20: right_gripper
+  - 21..26: right_joint
+  - 27..31: 保留位
+
+  Piper 双臂真正直接能提供的是 14 维状态，XR0 在运行时就是把这 14 维塞进对应槽
+  位，其他位置补 0。这个组合逻辑已经写死在 桌面/Xiaomi-Robotics-0/xr0/mibot/
+  utils/io.py:157：
+
+  - left_gripper.pos -> state[6]
+  - left_joint_1..6.pos -> state[7..12]
+  - right_gripper.pos -> state[20]
+  - right_joint_1..6.pos -> state[21..26]
+
+  所以对 Piper 来说，现阶段最合理的执行映射是只看这些动作切片：
+
+  - 左夹爪: dim 6
+  - 左 6 关节: dim 7..12
+  - 右夹爪: dim 20
+  - 右 6 关节: dim 21..26
+
+  ee_pos/ee_aa 那 12 维先不要拿去直接控 Piper，除非你后面再补 FK/IK 和安全约束
+  层。
+
+  双臂 Smoke
+  我已经加了一个新的双臂脚本 桌面/Xiaomi-Robotics-0/xr0/tools/
+  bi_piper_smoke_client.py:21。它直接复用了 teleop_evo 里现成的
+  BiPiperFollower，把双臂观测映射到 XR0 需要的：
+
+  - robot_state
+  - ego_obs
+  - left_wrist_obs
+  - right_wrist_obs
+
+  脚本实现有两个关键点：
+
+  - 用 BiPiperFollower 读取 left_* / right_* 关节和夹爪，并映射成 XR0 的左右臂
+    state 槽位，见 桌面/Xiaomi-Robotics-0/xr0/tools/bi_piper_smoke_client.py:58
+    和 桌面/Xiaomi-Robotics-0/xr0/tools/bi_piper_smoke_client.py:78。
+  - 共享顶视相机只挂到一侧 arm config，避免同一台 RealSense 被打开两次，见 桌面/
+    Xiaomi-Robotics-0/xr0/tools/bi_piper_smoke_client.py:116。
+
+  我还顺手修了两处相关问题：
+
+  - transformers 那个反复刷屏的 warning 已经去掉了，改在 桌面/Xiaomi-Robotics-0/
+    xr0/mibot/server/runtime/client.py:95。
+  - 双臂连接如果右臂失败，现在会回滚左臂，不会留半连接状态，改在 teleop_evo/src/
+    lerobot/robots/bi_piper_follower/bi_piper_follower.py:116。
+
+  完整说明和映射表我也写进了 桌面/Xiaomi-Robotics-0/xr0/docs/
+  bi_piper_smoke_test.md:16。
+
+  你现在可以直接这样跑双臂冒烟测试：
+
+  PYTHONPATH=/home/whz/teleop_evo/src:/home/whz/桌面/Xiaomi-Robotics-0/xr0 \
+  python tools/bi_piper_smoke_client.py \
+    --host 192.168.110.85 \
+    --port 10096 \
+    --processor Qwen/Qwen3-VL-4B-Instruct \
+    --left-can can0 \
+    --right-can can1 \
+    --top-camera 420222071960 \
+    --right-wrist-camera 419622072329 \
+    --missing-left-wrist-fill black \
+    --ego-camera-side left \
+    --task "bimanual smoke test" \
+    --iterations 5
+
+
+419522073184
+  如果你的顶视相机更适合挂在右臂配置上，就把 --ego-camera-side left 改成 right。
+  
+  
+  
+  
+  数据采集
+  
+cd /home/whz/桌面/Xiaomi-Robotics-0/xr0
+
+python tools/bi_piper_xr0_collect.py \
+    --task "bimanual pick and place" \
+    --left-follower-can can0 \
+    --right-follower-can can1 \
+    --left-leader-can can2 \
+    --right-leader-can can3 \
+    --top-camera 420222071960 \
+    --right-wrist-camera 419622072329 \
+    --missing-left-wrist-fill black \
+    --ego-camera-side left \
+    --episodes 20 \
+    --episode-seconds 20 \
+    --output-root ./data/bi_piper_xr0
+    
+    
+• 采集脚本已经放在 桌面/Xiaomi-Robotics-0/xr0/tools/bi_piper_xr0_collect.py，后
+  处理脚本已经放在 桌面/Xiaomi-Robotics-0/xr0/tools/prepare_xr0_dataset.py。
+
+  你现在可以先用这个采集命令。这里我把你新增的左腕相机 419522073184 填进去了。唯
+  一我无法从当前上下文确定的是双 leader 的 CAN 口，所以我先按 can2/can3 写。如果
+  你的 leader 不是这两个口，只改这两个参数即可。
+
+  cd /home/whz/桌面/Xiaomi-Robotics-0/xr0
+
+  python tools/bi_piper_xr0_collect.py \
+    --task "bimanual pick and place" \
+    --output-root ./data/bi_piper_xr0 \
+    --episodes 20 \
+    --episode-seconds 20 \
+    --left-follower-can can0 \
+    --right-follower-can can1 \
+    --left-leader-can can2 \
+    --right-leader-can can3 \
+    --top-camera 420222071960 \
+    --left-wrist-camera 419522073184 \
+    --right-wrist-camera 419622072329 \
+    --ego-camera-side left
+
+  这个脚本每一帧会采这些信息，并按 XR0 格式落盘：
+
+  - 三路视频：ego、wrist_left、wrist_right
+  - 当前 proprio：
+      - left_ee_pos [3]
+      - left_ee_rotm [9]
+      - left_arm_joint [6]
+      - left_gripper_pos [1]
+      - right_ee_pos [3]
+      - right_ee_rotm [9]
+      - right_arm_joint [6]
+      - right_gripper_pos [1]
+  - 当前帧对应的目标 action：
+      - 同样一套 left/right ee_pos / ee_rotm / arm_joint / gripper_pos
+  - episode 元数据：
+      - trajectory_type
+      - time
+      - num_frames
+      - instruction.general
+      - 三路视频路径
+
+  几点你需要知道：
+
+  - ee_pos 默认按 mm 保存；如果你想改成米，用 --position-unit m
+  - joint 和 gripper 是沿用当前 PiPER/LeRobot 读数的原始控制单位
+  - ee_pos 和 ee_rotm 不是相机估计出来的，是用 PiPER SDK 的 FK 从 6 关节算出来的
+  - 保存的 actions 是“实际发给 follower 的绝对目标值”，不是 delta
+  - 录制时按键：
+      - s 保存为 success
+      - f 保存为 invalid
+      - o 保存为 ongoing
+      - d 丢弃当前 episode
+      - q 退出会话
+      - 直接回车结束当前 episode 并再提示你选标签
+  - 少于 30 帧的 episode 会被当前 XR0 loader 跳过，所以尽量每段至少录够 30 帧
+
+  采完以后，直接跑这个后处理命令统计 mean/std 并生成训练配置。这里假设你就用上面
+  那个输出目录：
+
+  cd /home/whz/桌面/Xiaomi-Robotics-0/xr0
+
+  python tools/prepare_xr0_dataset.py \
+    --dataset-root ./data/bi_piper_xr0 \
+    --dataset-name bi_piper_xr0 \
+    --trainer-project xr0_bipiper \
+    --trainer-exp-name bi_piper_xr0 \
+    --trainer-default-root-dir ./runs
+
+  这条命令会生成两样东西：
+
+  - ./data/bi_piper_xr0/stats_action30.json
+  - ./configs/train_bi_piper_xr0.yaml
+
+  然后直接训练：
+
+  cd /home/whz/桌面/Xiaomi-Robotics-0/xr0
+  python tools/train.py --config-name train_bi_piper_xr0
+
+  补充两点：
+
+  - prepare_xr0_dataset.py 默认统计时会跳过 trajectory_type=invalid 的 episode，
+    但训练配置仍然会指向整个 json 目录，invalid 样本在训练里会按现有 loader 逻辑
+    被 mask
+  - 我已经对这两个脚本做了语法检查；prepare_xr0_dataset.py 还做过一次临时最小数
+    据的端到端冒烟。采集脚本我没有替你做真实硬件联调
+
+  如果你把双 leader 的实际 CAN 口告诉我，我可以把上面那条采集命令直接替你改成完
+  全可执行的最终版本。
+    
+

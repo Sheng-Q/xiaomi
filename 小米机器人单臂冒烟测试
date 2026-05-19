@@ -1,0 +1,82 @@
+我把结论和可直接用的最小方案落到仓库里了。先说核心判断：
+
+  这个项目里你要关心的是两套完全不同的服务端。
+
+  - 仿真/benchmark 用的是根目录的 桌面/Xiaomi-Robotics-0/deploy/server.py 和 桌
+    面/Xiaomi-Robotics-0/deploy/client.py。
+  - 真机后训练用的是 xr0/ 下面这套：桌面/Xiaomi-Robotics-0/xr0/mibot/server/
+    runtime/client.py:15、桌面/Xiaomi-Robotics-0/xr0/mibot/server/runtime/
+    server.py、桌面/Xiaomi-Robotics-0/xr0/mibot/utils/io.py:182。
+
+  你这台机器上现成、最值得复用的客户端不是项目自带的，而是 teleop_evo 里的单臂
+  piper 客户端：teleop_evo/src/lerobot/robots/piper_follower/
+  piper_follower.py:46。它已经能做这几件事：
+
+  - 通过 piper_sdk 读 CAN 上的关节和夹爪。
+  - 通过 RealSense 读顶视角和腕部相机。
+  - 保留了你之前本机用过的相机串号和 can1 习惯用法，能直接参考你那份 launcher：
+    桌面/lerobot远程推理测试集合/测试0408。
+
+  但有个关键限制必须说清楚：xr0 这套真机协议是双臂 32 维 schema，当前本机现成客
+  户端是单臂 piper。所以在你“没有数据、没有后训练 checkpoint”的前提下，最合理的
+  最小冒烟测试不是动机器人，而是只验证：
+
+  - 本地 piper 状态采集
+  - 本地图像采集
+  - 本地到远端服务端的 XR0 官方 TCP 协议
+  - 返回 (30, 32) action chunk 的解析
+
+  为此我加了 3 个东西：
+
+  - 单臂 piper 到 XR0 双臂 schema 的适配客户端：桌面/Xiaomi-Robotics-0/xr0/
+    tools/piper_smoke_client.py:21
+  - 无 checkpoint 也能跑的 mock 服务端：桌面/Xiaomi-Robotics-0/xr0/tools/
+    mock_runtime_server.py:46
+  - 一份说明文档：桌面/Xiaomi-Robotics-0/xr0/docs/piper_smoke_test.md:1
+
+  另外我顺手做了两个很小但必要的 runtime 改动：
+
+  - 桌面/Xiaomi-Robotics-0/xr0/mibot/server/runtime/client.py:15 现在支持
+    processor_name_or_path，这样工业机离线时可以直接指向本地 Qwen processor 目
+    录，不必写死 HF 名称。
+  - 桌面/Xiaomi-Robotics-0/xr0/mibot/utils/io.py:182 现在允许只有 joint/
+    gripper、没有 EE pose 的 robot_state，这样就能直接复用你现有 teleop_evo 客户
+    端，不用先把 FK 全补齐。
+
+  最小冒烟测试这样做就够了。
+
+  远端服务器先起 mock server，不需要 checkpoint：
+
+  cd /path/to/Xiaomi-Robotics-0/xr0
+  PYTHONPATH=$PWD python tools/mock_runtime_server.py \
+    --host 0.0.0.0 \
+    --port 10096 \
+    --sleep-ms 50
+
+  这台 piper 工控机跑本地适配客户端，直接复用你之前那组相机串号：
+
+  PYTHONPATH=/home/whz/teleop_evo/src:/home/whz/桌面/Xiaomi-Robotics-0/xr0 \
+  python /home/whz/桌面/Xiaomi-Robotics-0/xr0/tools/piper_smoke_client.py \
+    --host 192.168.110.85 \
+    --port 10086 \
+    --processor Qwen/Qwen3-VL-4B-Instruct \
+    --can can1 \
+    --top-camera 420222071960 \
+    --wrist-camera 419622072329 \
+    --task "smoke test" \
+    --active-side left \
+    --iterations 5
+
+  这个客户端做的适配逻辑很简单，也正是你后面真要改客户端时该改的地方：
+
+  - 读取单臂 joint_1.pos ... joint_6.pos 和 gripper.pos
+  - 映射到 XR0 的 left_arm_joint/left_gripper_pos 或 right_*
+  - 用 ego 和 wrist 两路图像填 XR0 的 ego_obs、left_wrist_obs、right_wrist_obs
+  - 缺失的那只手用 zero 或 copy-active 填充
+  - 只做发送和回包解析，不下发控制命令
+
+  也就是说，如果你问“客户端具体要怎么改”，最小改动不是去碰 piper_sdk 本身，而是
+  把你原来单臂客户端的观测组织层改成 XR0 需要的这套双臂 payload 组织方式。对应实
+  现就在 桌面/Xiaomi-Robotics-0/xr0/tools/piper_smoke_client.py:79 到 桌面/
+  Xiaomi-Robotics-0/xr0/tools/piper_smoke_client.py:115。
+
