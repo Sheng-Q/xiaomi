@@ -32,10 +32,11 @@ XR0 当前训练链路并没有把输入图像数量写死成 3 张，真正决�
 - mock XR0 数据生成成功
 - 5 路图像 JSON 扩展成功
 - `Qwen3-VL` 的 batch preprocess smoke test 成功
-- 真正训练已跑到 `Epoch 0: 100% | 1/1`
+- 默认 `deepspeed.ops.adam.FusedAdam` 已在 `/usr/bin/gcc-11 + /usr/bin/g++-11` 下编译通过
+- 真正训练已在 mock 数据 + `FusedAdam` 下跑到 `Trainer.fit stopped: max_steps=1 reached.`
+- `last.ckpt` 已成功落盘
 
-最后一次失败发生在 checkpoint 保存阶段，原因是磁盘空间不足，不是数据链路或模型链路错误。  
-也就是说，从“触觉 5 视角能不能接进 XR0 训练”这个问题本身看，冒烟测试已经通过。
+也就是说，从“触觉 5 视角能不能接进 XR0 训练”这个问题本身看，冒烟测试已经通过；并且这次通过用的是仓库默认优化器 `FusedAdam`，不是临时替换成 `SGD`。
 
 ## 本文档只保留一条已验证路径
 
@@ -43,9 +44,8 @@ XR0 当前训练链路并没有把输入图像数量写死成 3 张，真正决�
 
 1. 下一步只使用上一步刚产出的文件
 2. 先用 mock 数据把链路跑通
-3. 训练命令避开已经踩过的两个坑
-   - DeepSpeed `FusedAdam` 编译失败
-   - `AdamW` 在单卡上额外吃显存
+3. 训练命令尽量贴近真实训练，只保留 smoke test 必要的轻量化改动
+4. 在当前 Ubuntu 22.04 + CUDA 12.8 机器上，显式固定 host 编译器为成对的 `gcc-11/g++-11`，保证 `FusedAdam` 可编译
 
 本流程用到的脚本分两类：
 
@@ -85,13 +85,22 @@ conda activate mibot
 ```bash
 rm -rf data/mock_xr0_base
 rm -rf data/mock_xr0_tactile
-rm -rf runs/tactile_5view_smoke
+rm -rf runs/project_xr0_smoke/tactile_5view_smoke
+rm -rf runs/project_xr0_smoke/tactile_5view_smoke_fusedadam
 ```
 
 如果环境里没有视频写入依赖，先装：
 
 ```bash
 pip install opencv-python-headless imageio imageio-ffmpeg
+```
+
+如果你想按本文档直接使用默认 `FusedAdam`，在这台机器上建议固定 host 编译器为成对版本：
+
+```bash
+export CC=/usr/bin/gcc-11
+export CXX=/usr/bin/g++-11
+export CUDAHOSTCXX=/usr/bin/g++-11
 ```
 
 ## 第 1 步：生成 mock XR0 基础数据
@@ -217,11 +226,15 @@ python tools/prepare_xr0_dataset.py \
 
 ### 推荐命令
 
-这条是当前最适合单卡 smoke test 的版本：
+这条是当前最推荐的单卡 smoke test 版本，也是已经在服务器上实际跑通的一版：
 
 ```bash
 cd ~/xiaomi/xr0
 conda activate mibot
+
+export CC=/usr/bin/gcc-11
+export CXX=/usr/bin/g++-11
+export CUDAHOSTCXX=/usr/bin/g++-11
 
 export WANDB_MODE=offline
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -230,42 +243,45 @@ CUDA_VISIBLE_DEVICES=0 RESOURCE_GPU=1 \
 bash scripts/train.sh \
   --config-name tactile_smoke \
   trainer.project="xr0_smoke" \
-  trainer.exp_name="tactile_5view_smoke" \
-  trainer.default_root_dir="./runs/tactile_5view_smoke" \
+  trainer.exp_name="tactile_5view_smoke_fusedadam" \
+  trainer.default_root_dir="./runs" \
   trainer.max_steps=1 \
   trainer.val_check_interval=1 \
   trainer.save_interval=999999 \
-  model.params.model.training_repeat=1 \
-  trainer.optimizer.type="torch.optim.SGD" \
-  'trainer.optimizer.params.lr=1e-4' \
-  'trainer.optimizer.params.weight_decay=0.1' \
-  '~trainer.optimizer.params.betas' \
-  '~trainer.optimizer.params.eps'
+  model.params.model.training_repeat=1
 ```
 
 这条命令这样写的原因是：
 
 - `--config-name tactile_smoke`
   直接使用上一步产出的 `configs/tactile_smoke.yaml`
+- `CC/CXX/CUDAHOSTCXX`
+  显式固定到 `/usr/bin/gcc-11` 和 `/usr/bin/g++-11`，保证 CUDA 12.8 下 `FusedAdam` 能稳定编译
 - `model.params.model.training_repeat=1`
   降低训练侧重复展开带来的额外压力
-- `trainer.optimizer.type="torch.optim.SGD"`
-  避开 DeepSpeed `FusedAdam` 的 CUDA 编译问题
-- 去掉 `betas` 和 `eps`
-  避免把 Adam 专用参数继续塞给 SGD
 - `trainer.save_interval=999999`
   避免在第 1 个 step 结束时就保存 checkpoint
+- `trainer.default_root_dir="./runs"`
+  这个仓库会自动再拼接 `project_{trainer.project}/{trainer.exp_name}`，所以最终输出目录会是
+  `./runs/project_xr0_smoke/tactile_5view_smoke_fusedadam`
+  而不会出现
+  `./runs/tactile_5view_smoke/project_xr0_smoke/tactile_5view_smoke`
+  这种重复套目录的情况
+- 没有覆盖 `trainer.optimizer.type`
+  所以会直接回到仓库默认的 `deepspeed.ops.adam.FusedAdam`
 
 ### 已验证到什么程度
 
 服务器上已经实际验证过的是：
 
 - 同一组数据链路
-- 同一组 `SGD + training_repeat=1` 思路
-- 训练能跑到 `Epoch 0: 100% | 1/1`
+- `/usr/bin/gcc-11 + /usr/bin/g++-11`
+- 仓库默认 `deepspeed.ops.adam.FusedAdam`
+- `model.params.model.training_repeat=1`
+- 训练成功跑到 `Trainer.fit stopped: max_steps=1 reached.`
+- 训练结束后 `last.ckpt` 已成功落盘
 
-最后一次报错出现在 checkpoint 保存阶段，原因是磁盘空间不足。  
-上面文档里的 `trainer.save_interval=999999` 是基于那个报错位置做的规避，目的是避免第 1 step 保存 checkpoint，从而更接近 clean exit。
+注意：即使 `max_steps=1`，训练结束后仍然可能花 1 到 3 分钟保存 `last.ckpt`。这是 DeepSpeed checkpoint 落盘时间，不代表训练卡死。
 
 ### 通过标准
 
@@ -273,9 +289,10 @@ bash scripts/train.sh \
 
 1. 第 3 步打印 `images_per_sample=5`
 2. 第 5 步成功进入训练
-3. 第 5 步至少跑到 `Epoch 0: 100% | 1/1`
+3. 第 5 步至少跑到 `Trainer.fit stopped: max_steps=1 reached.`
+4. 没有 traceback
 
-如果失败只发生在 checkpoint 保存，而前面已经跑到 `1/1`，那从“触觉 5 视角训练链路是否打通”的角度，依然算功能通过。
+如果还能看到 `runs/project_xr0_smoke/tactile_5view_smoke_fusedadam/last.ckpt` 成功生成，那说明这轮冒烟测试已经完整闭环。
 
 ## 最小可复现实验总结
 
@@ -328,6 +345,10 @@ python tools/prepare_xr0_dataset.py \
 5. 跑 1 step 训练
 
 ```bash
+export CC=/usr/bin/gcc-11
+export CXX=/usr/bin/g++-11
+export CUDAHOSTCXX=/usr/bin/g++-11
+
 export WANDB_MODE=offline
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
@@ -335,17 +356,12 @@ CUDA_VISIBLE_DEVICES=0 RESOURCE_GPU=1 \
 bash scripts/train.sh \
   --config-name tactile_smoke \
   trainer.project="xr0_smoke" \
-  trainer.exp_name="tactile_5view_smoke" \
-  trainer.default_root_dir="./runs/tactile_5view_smoke" \
+  trainer.exp_name="tactile_5view_smoke_fusedadam" \
+  trainer.default_root_dir="./runs" \
   trainer.max_steps=1 \
   trainer.val_check_interval=1 \
   trainer.save_interval=999999 \
-  model.params.model.training_repeat=1 \
-  trainer.optimizer.type="torch.optim.SGD" \
-  'trainer.optimizer.params.lr=1e-4' \
-  'trainer.optimizer.params.weight_decay=0.1' \
-  '~trainer.optimizer.params.betas' \
-  '~trainer.optimizer.params.eps'
+  model.params.model.training_repeat=1
 ```
 
 ## 如果后面要接真实触觉视频
@@ -403,7 +419,7 @@ python tools/add_tactile_views_to_json_dataset.py \
 
 - `~/.cache/huggingface/hub`
   这里会缓存 `Qwen/Qwen3-VL-4B-Instruct`
-- `~/xiaomi/xr0/runs/tactile_5view_smoke`
+- `~/xiaomi/xr0/runs/project_xr0_smoke/tactile_5view_smoke_fusedadam`
   训练输出目录，之前磁盘满时这里可能留下半截 checkpoint
 - `~/xiaomi/xr0/wandb/offline-run-*`
 - `~/.triton`
@@ -427,7 +443,8 @@ du -sh \
 通常可以安全清掉：
 
 ```bash
-rm -rf ~/xiaomi/xr0/runs/tactile_5view_smoke
+rm -rf ~/xiaomi/xr0/runs/project_xr0_smoke/tactile_5view_smoke
+rm -rf ~/xiaomi/xr0/runs/project_xr0_smoke/tactile_5view_smoke_fusedadam
 rm -rf ~/xiaomi/xr0/wandb/offline-run-*
 rm -rf ~/.cache/torch_extensions
 rm -rf ~/.triton
