@@ -1,5 +1,18 @@
 # XR0 触觉工具包
 
+> **强烈推荐：当前效果较好的实时热力图预览命令**
+>
+> 启动时会自动标定，标定更稳，热力图量程限制在 `0` 到 `5`：
+>
+> ```bash
+> cd ~/xiaomi/xr0 && conda activate mibot && python tools/tactile_preview_server.py --port /dev/ttyACM0 --mode auto_push --calibrate --calibration-warmup-frames 30 --calibration-samples 80 --calibration-interval 0.03 --calibration-reducer median --heatmap-vmin 0.0 --heatmap-vmax 5.0 --heatmap-colormap turbo --heatmap-gamma 0.55
+> ```
+>
+> 使用时注意：
+> - 启动后的前几秒不要让触觉传感器接触任何物体
+> - 标定完成后再去按压或接触物体
+> - 如果静止时仍然有明显残余亮斑，可以把 `--calibration-warmup-frames` 提高到 `40`
+
 这个工具包把旧版 `tactile_ws` 里和触觉传感器相关的核心能力整理成了一个不依赖 ROS 的工具模块，可以直接运行在现有的 `mibot` conda 环境中。
 
 ## 功能概览
@@ -176,7 +189,7 @@ python tools/tactile_monitor.py \
   可选值：`median` 或 `mean`。
   默认值：`median`。
   怎么选：
-  `median` 更抗异常值和瞬时抖动，适合你现在这种“标定不太稳定”的情况。
+  `median` 更抗异常值和瞬时抖动，适合“标定不太稳定”的情况。
   `mean` 会更贴近传统平均值，但更容易被偶发尖峰影响。
 
 - `--poll-interval`
@@ -200,7 +213,7 @@ python tools/tactile_monitor.py \
   含义：Fz 热力图量程下界。
   默认值：`0.0`。
   怎么理解：小于等于这个值的区域，会被映射成最暗的颜色。
-  推荐用法：普通接触可视化一般保持 `0.0` 即可。
+  推荐用法：普通接触可视化一般保持 `0.0` 即可。如果你想压掉轻微残余亮斑，可以适当调到 `0.2` 或 `0.3`。
 
 - `--heatmap-vmax`
   含义：Fz 热力图量程上界。
