@@ -21,10 +21,14 @@ class TactileRuntime:
         poll_interval: float = 0.1,
         calibration_samples: int = 50,
         calibration_interval: float = 0.05,
+        calibration_warmup_frames: int = 20,
+        calibration_reducer: str = "median",
         logger: Optional[logging.Logger] = None,
     ) -> None:
         if read_mode not in {"auto_push", "distributed_poll"}:
             raise ValueError(f"Unsupported tactile read mode: {read_mode}")
+        if calibration_reducer not in {"mean", "median"}:
+            raise ValueError(f"Unsupported calibration reducer: {calibration_reducer}")
 
         self.driver = driver
         self.read_mode = read_mode
@@ -32,6 +36,8 @@ class TactileRuntime:
         self.poll_interval = poll_interval
         self.calibration_samples = calibration_samples
         self.calibration_interval = calibration_interval
+        self.calibration_warmup_frames = max(int(calibration_warmup_frames), 0)
+        self.calibration_reducer = calibration_reducer
         self.logger = logger or logging.getLogger(__name__)
 
         self._lock = threading.Lock()
@@ -66,12 +72,14 @@ class TactileRuntime:
         self._thread = None
         self.driver.close()
 
-    def wait_for_frame(self, timeout: float = 3.0) -> Optional[TactileFrame]:
-        if self._latest_frame is not None:
-            return self.get_latest_frame(copy_frame=True)
-        if not self._frame_event.wait(timeout=timeout):
-            return None
-        return self.get_latest_frame(copy_frame=True)
+    def wait_for_frame(self, timeout: float = 3.0, after_timestamp: Optional[float] = None) -> Optional[TactileFrame]:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            frame = self.get_latest_frame(copy_frame=True)
+            if frame is not None and (after_timestamp is None or frame.timestamp > after_timestamp):
+                return frame
+            time.sleep(0.01)
+        return None
 
     def get_latest_frame(self, copy_frame: bool = True) -> Optional[TactileFrame]:
         with self._lock:
@@ -115,19 +123,39 @@ class TactileRuntime:
         )
         return snapshot if not copy_snapshot else snapshot.copy()
 
-    def calibrate(self, sample_count: Optional[int] = None, sample_interval: Optional[float] = None) -> Dict[str, np.ndarray]:
+    def calibrate(
+        self,
+        sample_count: Optional[int] = None,
+        sample_interval: Optional[float] = None,
+        warmup_frames: Optional[int] = None,
+        reducer: Optional[str] = None,
+    ) -> Dict[str, np.ndarray]:
         if not self._running:
             raise RuntimeError("Tactile runtime must be started before calibration")
 
         sample_count = sample_count or self.calibration_samples
         sample_interval = sample_interval if sample_interval is not None else self.calibration_interval
+        warmup_frames = self.calibration_warmup_frames if warmup_frames is None else max(int(warmup_frames), 0)
+        reducer = self.calibration_reducer if reducer is None else reducer
+        if reducer not in {"mean", "median"}:
+            raise ValueError(f"Unsupported calibration reducer: {reducer}")
 
         samples = {name: [] for name in SENSOR_NAMES}
         distributed_samples = {name: [] for name in SENSOR_NAMES}
+        last_timestamp: Optional[float] = None
+
+        for _ in range(warmup_frames):
+            frame = self.wait_for_frame(timeout=max(self.read_timeout * 10.0, 1.0), after_timestamp=last_timestamp)
+            if frame is None:
+                raise RuntimeError("Timed out while waiting for tactile data during calibration warmup")
+            last_timestamp = frame.timestamp
+            time.sleep(sample_interval)
+
         for _ in range(sample_count):
-            frame = self.wait_for_frame(timeout=max(self.read_timeout * 10.0, 1.0))
+            frame = self.wait_for_frame(timeout=max(self.read_timeout * 10.0, 1.0), after_timestamp=last_timestamp)
             if frame is None:
                 raise RuntimeError("Timed out while waiting for tactile data during calibration")
+            last_timestamp = frame.timestamp
             for name in SENSOR_NAMES:
                 sensor = frame.sensors.get(name)
                 if sensor is None:
@@ -142,16 +170,13 @@ class TactileRuntime:
         with self._lock:
             for name in SENSOR_NAMES:
                 if samples[name]:
-                    self.offsets[name] = np.mean(np.stack(samples[name], axis=0), axis=0).astype(np.float32)
+                    self.offsets[name] = self._reduce_calibration_samples(samples[name], reducer)
                 else:
                     self.offsets[name] = np.zeros(3, dtype=np.float32)
                 offsets[name] = self.offsets[name].copy()
 
                 if distributed_samples[name]:
-                    self.distributed_offsets[name] = np.mean(
-                        np.stack(distributed_samples[name], axis=0),
-                        axis=0,
-                    ).astype(np.float32)
+                    self.distributed_offsets[name] = self._reduce_calibration_samples(distributed_samples[name], reducer)
                 else:
                     self.distributed_offsets[name] = None
                 distributed_offsets[name] = None if self.distributed_offsets[name] is None else self.distributed_offsets[name].copy()
@@ -167,7 +192,9 @@ class TactileRuntime:
                 }
 
         self.logger.info(
-            "Calibrated tactile offsets: force=%s distributed=%s",
+            "Calibrated tactile offsets with %s reducer after %d warmup frames: force=%s distributed=%s",
+            reducer,
+            warmup_frames,
             {k: v.tolist() for k, v in offsets.items()},
             distributed_summary,
         )
@@ -226,3 +253,9 @@ class TactileRuntime:
 
             if self.read_mode == "distributed_poll":
                 time.sleep(self.poll_interval)
+
+    def _reduce_calibration_samples(self, samples: list[np.ndarray], reducer: str) -> np.ndarray:
+        stacked = np.stack(samples, axis=0)
+        if reducer == "median":
+            return np.median(stacked, axis=0).astype(np.float32)
+        return np.mean(stacked, axis=0).astype(np.float32)

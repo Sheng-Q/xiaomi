@@ -45,6 +45,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--calibrate", action="store_true", help="Run zero-point calibration after frames arrive.")
     parser.add_argument("--calibration-samples", type=int, default=50)
     parser.add_argument("--calibration-interval", type=float, default=0.05)
+    parser.add_argument(
+        "--calibration-warmup-frames",
+        type=int,
+        default=20,
+        help="Discard this many frames before collecting calibration samples.",
+    )
+    parser.add_argument(
+        "--calibration-reducer",
+        choices=("median", "mean"),
+        default="median",
+        help="How to aggregate calibration samples into the final offset.",
+    )
     parser.add_argument("--poll-interval", type=float, default=0.1, help="Used only in distributed_poll mode.")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="HTTP bind address.")
     parser.add_argument("--http-port", type=int, default=8765, help="HTTP port for the preview page.")
@@ -178,6 +190,8 @@ def main() -> None:
         poll_interval=args.poll_interval,
         calibration_samples=args.calibration_samples,
         calibration_interval=args.calibration_interval,
+        calibration_warmup_frames=args.calibration_warmup_frames,
+        calibration_reducer=args.calibration_reducer,
         logger=logger,
     )
     visualizer = TactileVisualizer(

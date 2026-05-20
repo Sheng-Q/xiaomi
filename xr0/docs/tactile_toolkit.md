@@ -165,6 +165,20 @@ python tools/tactile_monitor.py \
   默认值：`0.05`。
   怎么调：值小一点，标定结束更快；值大一点，对时间噪声更稳。
 
+- `--calibration-warmup-frames`
+  含义：正式开始统计零点之前，先丢弃多少帧预热数据。
+  默认值：`20`。
+  怎么调：如果你发现刚启动时前几帧波动大、标定容易漂，建议增大这个值。
+  推荐范围：`10` 到 `40`。
+
+- `--calibration-reducer`
+  含义：把多帧标定样本汇总成最终零点时使用的统计方式。
+  可选值：`median` 或 `mean`。
+  默认值：`median`。
+  怎么选：
+  `median` 更抗异常值和瞬时抖动，适合你现在这种“标定不太稳定”的情况。
+  `mean` 会更贴近传统平均值，但更容易被偶发尖峰影响。
+
 - `--poll-interval`
   含义：`distributed_poll` 模式下，两次轮询之间的等待时间。
   默认值：`0.1`。
@@ -292,6 +306,8 @@ python tools/tactile_monitor.py \
 
 - 如果静止不接触时热力图仍然长期有亮斑，重新运行一次并带上 `--calibrate`
 - 如果静止时基线总在慢慢漂，适当增大 `--calibration-samples`
+- 如果刚启动时前几帧波动很大，增大 `--calibration-warmup-frames`
+- 如果偶发尖峰会把标定带偏，优先使用 `--calibration-reducer median`
 - 如果你觉得启动太慢，可以减小 `--calibration-samples` 或 `--calibration-interval`
 
 一个比较稳妥的标定示例：
@@ -301,8 +317,10 @@ python tools/tactile_monitor.py \
   --port /dev/ttyACM0 \
   --mode auto_push \
   --calibrate \
+  --calibration-warmup-frames 30 \
   --calibration-samples 80 \
   --calibration-interval 0.03 \
+  --calibration-reducer median \
   --max-frames 30
 ```
 
