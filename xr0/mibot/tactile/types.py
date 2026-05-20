@@ -53,10 +53,20 @@ class TactileSnapshot:
     frame: TactileFrame
     calibrated_force: Dict[str, np.ndarray]
     offsets: Dict[str, np.ndarray]
+    calibrated_distributed: Dict[str, Optional[np.ndarray]] = field(default_factory=dict)
+    distributed_offsets: Dict[str, Optional[np.ndarray]] = field(default_factory=dict)
 
     def copy(self) -> "TactileSnapshot":
         return TactileSnapshot(
             frame=self.frame.copy(),
             calibrated_force={name: value.copy() for name, value in self.calibrated_force.items()},
             offsets={name: value.copy() for name, value in self.offsets.items()},
+            calibrated_distributed={
+                name: None if value is None else value.copy()
+                for name, value in self.calibrated_distributed.items()
+            },
+            distributed_offsets={
+                name: None if value is None else value.copy()
+                for name, value in self.distributed_offsets.items()
+            },
         )

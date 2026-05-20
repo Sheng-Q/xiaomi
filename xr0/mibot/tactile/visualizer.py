@@ -10,10 +10,42 @@ from .types import TactileFrame, TactileSnapshot
 
 
 class TactileVisualizer:
-    def __init__(self, output_size: int = 256, vmax_fz: float = 25.5, vmax_shear: float = 12.8) -> None:
+    COLORMAPS = {
+        "turbo": cv2.COLORMAP_TURBO,
+        "inferno": cv2.COLORMAP_INFERNO,
+        "plasma": cv2.COLORMAP_PLASMA,
+        "viridis": cv2.COLORMAP_VIRIDIS,
+        "cividis": cv2.COLORMAP_CIVIDIS,
+        "jet": cv2.COLORMAP_JET,
+        "hot": cv2.COLORMAP_HOT,
+        "bone": cv2.COLORMAP_BONE,
+    }
+
+    def __init__(
+        self,
+        output_size: int = 256,
+        heatmap_vmin: float = 0.0,
+        heatmap_vmax: float = 25.5,
+        heatmap_colormap: str = "turbo",
+        heatmap_gamma: float = 0.75,
+        rgb_vmax_fz: float = 25.5,
+        rgb_vmax_shear: float = 12.8,
+    ) -> None:
         self.output_size = output_size
-        self.vmax_fz = vmax_fz
-        self.vmax_shear = vmax_shear
+        self.heatmap_vmin = heatmap_vmin
+        self.heatmap_vmax = heatmap_vmax
+        self.heatmap_colormap = heatmap_colormap.lower()
+        self.heatmap_gamma = heatmap_gamma
+        self.rgb_vmax_fz = rgb_vmax_fz
+        self.rgb_vmax_shear = rgb_vmax_shear
+
+        if self.heatmap_colormap not in self.COLORMAPS:
+            supported = ", ".join(sorted(self.COLORMAPS))
+            raise ValueError(f"Unsupported heatmap colormap '{heatmap_colormap}'. Supported: {supported}")
+
+    @classmethod
+    def available_colormaps(cls) -> list[str]:
+        return sorted(cls.COLORMAPS)
 
     def gen_coords(self, point_count: int) -> np.ndarray:
         if point_count == 68:
@@ -64,14 +96,25 @@ class TactileVisualizer:
             grid = griddata(coords, values, (grid_x, grid_y), method="linear", fill_value=0)
         return np.nan_to_num(grid, nan=0.0).astype(np.float32)
 
+    def normalize_scalar_map(self, values: np.ndarray, vmin: float, vmax: float, gamma: float = 1.0) -> np.ndarray:
+        dynamic_range = max(vmax - vmin, 1e-6)
+        normalized = np.clip((values - vmin) / dynamic_range, 0.0, 1.0)
+        normalized = np.power(normalized, max(gamma, 1e-6))
+        return (normalized * 255.0).astype(np.uint8)
+
     def make_fz_heatmap(self, coords: Optional[np.ndarray], data: Optional[np.ndarray]) -> np.ndarray:
         if data is None:
             image = np.zeros((self.output_size, self.output_size), dtype=np.uint8)
-            return cv2.applyColorMap(image, cv2.COLORMAP_JET)
+            return cv2.applyColorMap(image, self.COLORMAPS[self.heatmap_colormap])
 
         fz = self.interpolate_channel(coords, data, 2)
-        fz_norm = np.clip(fz / max(self.vmax_fz, 1e-6) * 255.0, 0, 255).astype(np.uint8)
-        return cv2.applyColorMap(fz_norm, cv2.COLORMAP_JET)
+        fz_norm = self.normalize_scalar_map(
+            fz,
+            vmin=self.heatmap_vmin,
+            vmax=self.heatmap_vmax,
+            gamma=self.heatmap_gamma,
+        )
+        return cv2.applyColorMap(fz_norm, self.COLORMAPS[self.heatmap_colormap])
 
     def make_rgb_map(self, coords: Optional[np.ndarray], data: Optional[np.ndarray]) -> np.ndarray:
         if data is None:
@@ -81,25 +124,28 @@ class TactileVisualizer:
         fy = self.interpolate_channel(coords, data, 1)
         fz = self.interpolate_channel(coords, data, 2)
 
-        red = np.clip((fx / max(self.vmax_shear, 1e-6) * 127.0) + 128.0, 0, 255).astype(np.uint8)
-        green = np.clip((fy / max(self.vmax_shear, 1e-6) * 127.0) + 128.0, 0, 255).astype(np.uint8)
-        blue = np.clip((fz / max(self.vmax_fz, 1e-6) * 255.0), 0, 255).astype(np.uint8)
+        red = np.clip((fx / max(self.rgb_vmax_shear, 1e-6) * 127.0) + 128.0, 0, 255).astype(np.uint8)
+        green = np.clip((fy / max(self.rgb_vmax_shear, 1e-6) * 127.0) + 128.0, 0, 255).astype(np.uint8)
+        blue = np.clip((fz / max(self.rgb_vmax_fz, 1e-6) * 255.0), 0, 255).astype(np.uint8)
         return np.stack([blue, green, red], axis=-1)
 
     def render_snapshot(self, snapshot: TactileSnapshot, calibrated: bool = True) -> np.ndarray:
         force_override = snapshot.calibrated_force if calibrated else None
-        return self.render_frame(snapshot.frame, force_override=force_override)
+        distributed_override = snapshot.calibrated_distributed if calibrated else None
+        return self.render_frame(
+            snapshot.frame,
+            force_override=force_override,
+            distributed_override=distributed_override,
+        )
 
     def render_frame(
         self,
         frame: TactileFrame,
         force_override: Optional[Dict[str, np.ndarray]] = None,
+        distributed_override: Optional[Dict[str, Optional[np.ndarray]]] = None,
     ) -> np.ndarray:
-        index_snapshot = frame.sensors.get("index_middle")
-        middle_snapshot = frame.sensors.get("middle_middle")
-
-        index_dist = None if index_snapshot is None else index_snapshot.distributed
-        middle_dist = None if middle_snapshot is None else middle_snapshot.distributed
+        index_dist = self._resolve_distributed("index_middle", frame, distributed_override)
+        middle_dist = self._resolve_distributed("middle_middle", frame, distributed_override)
 
         index_coords = self.gen_coords(index_dist.shape[0]) if index_dist is not None else None
         middle_coords = self.gen_coords(middle_dist.shape[0]) if middle_dist is not None else None
@@ -147,6 +193,21 @@ class TactileVisualizer:
                 (0, 255, 255),
                 1,
             )
+
+        footer = (
+            f"Heatmap {self.heatmap_colormap} "
+            f"[{self.heatmap_vmin:.2f},{self.heatmap_vmax:.2f}] "
+            f"gamma={self.heatmap_gamma:.2f}"
+        )
+        cv2.putText(
+            canvas,
+            footer,
+            (10, canvas.shape[0] - 12),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1,
+        )
         return canvas
 
     def _resolve_force(
@@ -159,6 +220,17 @@ class TactileVisualizer:
             return force_override[sensor_name]
         snapshot = frame.sensors.get(sensor_name)
         return None if snapshot is None else snapshot.force
+
+    def _resolve_distributed(
+        self,
+        sensor_name: str,
+        frame: TactileFrame,
+        distributed_override: Optional[Dict[str, Optional[np.ndarray]]],
+    ) -> Optional[np.ndarray]:
+        if distributed_override is not None and sensor_name in distributed_override:
+            return distributed_override[sensor_name]
+        snapshot = frame.sensors.get(sensor_name)
+        return None if snapshot is None else snapshot.distributed
 
     def _overlay_text(self, image: np.ndarray, title: str, force: Optional[np.ndarray], x: int, y: int) -> None:
         cv2.putText(image, title, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)

@@ -42,6 +42,9 @@ class TactileRuntime:
         self.offsets: Dict[str, np.ndarray] = {
             name: np.zeros(3, dtype=np.float32) for name in SENSOR_NAMES
         }
+        self.distributed_offsets: Dict[str, Optional[np.ndarray]] = {
+            name: None for name in SENSOR_NAMES
+        }
 
     def start(self) -> None:
         if self._running:
@@ -83,12 +86,33 @@ class TactileRuntime:
 
         with self._lock:
             offsets = {name: value.copy() for name, value in self.offsets.items()}
+            distributed_offsets = {
+                name: None if value is None else value.copy()
+                for name, value in self.distributed_offsets.items()
+            }
 
         calibrated_force: Dict[str, np.ndarray] = {}
+        calibrated_distributed: Dict[str, Optional[np.ndarray]] = {}
         for name in SENSOR_NAMES:
             calibrated_force[name] = frame.get_force(name) - offsets[name]
+            sensor = frame.sensors.get(name)
+            if sensor is None or sensor.distributed is None:
+                calibrated_distributed[name] = None
+                continue
 
-        snapshot = TactileSnapshot(frame=frame, calibrated_force=calibrated_force, offsets=offsets)
+            offset = distributed_offsets.get(name)
+            if offset is None or offset.shape != sensor.distributed.shape:
+                calibrated_distributed[name] = sensor.distributed.copy()
+            else:
+                calibrated_distributed[name] = sensor.distributed - offset
+
+        snapshot = TactileSnapshot(
+            frame=frame,
+            calibrated_force=calibrated_force,
+            offsets=offsets,
+            calibrated_distributed=calibrated_distributed,
+            distributed_offsets=distributed_offsets,
+        )
         return snapshot if not copy_snapshot else snapshot.copy()
 
     def calibrate(self, sample_count: Optional[int] = None, sample_interval: Optional[float] = None) -> Dict[str, np.ndarray]:
@@ -99,16 +123,22 @@ class TactileRuntime:
         sample_interval = sample_interval if sample_interval is not None else self.calibration_interval
 
         samples = {name: [] for name in SENSOR_NAMES}
+        distributed_samples = {name: [] for name in SENSOR_NAMES}
         for _ in range(sample_count):
             frame = self.wait_for_frame(timeout=max(self.read_timeout * 10.0, 1.0))
             if frame is None:
                 raise RuntimeError("Timed out while waiting for tactile data during calibration")
             for name in SENSOR_NAMES:
-                if name in frame.sensors:
-                    samples[name].append(frame.sensors[name].force.copy())
+                sensor = frame.sensors.get(name)
+                if sensor is None:
+                    continue
+                samples[name].append(sensor.force.copy())
+                if sensor.distributed is not None:
+                    distributed_samples[name].append(sensor.distributed.copy())
             time.sleep(sample_interval)
 
         offsets: Dict[str, np.ndarray] = {}
+        distributed_offsets: Dict[str, Optional[np.ndarray]] = {}
         with self._lock:
             for name in SENSOR_NAMES:
                 if samples[name]:
@@ -117,13 +147,37 @@ class TactileRuntime:
                     self.offsets[name] = np.zeros(3, dtype=np.float32)
                 offsets[name] = self.offsets[name].copy()
 
-        self.logger.info("Calibrated tactile offsets: %s", {k: v.tolist() for k, v in offsets.items()})
+                if distributed_samples[name]:
+                    self.distributed_offsets[name] = np.mean(
+                        np.stack(distributed_samples[name], axis=0),
+                        axis=0,
+                    ).astype(np.float32)
+                else:
+                    self.distributed_offsets[name] = None
+                distributed_offsets[name] = None if self.distributed_offsets[name] is None else self.distributed_offsets[name].copy()
+
+        distributed_summary = {}
+        for name, offset in distributed_offsets.items():
+            if offset is None:
+                distributed_summary[name] = None
+            else:
+                distributed_summary[name] = {
+                    "shape": list(offset.shape),
+                    "mean_abs": float(np.mean(np.abs(offset))),
+                }
+
+        self.logger.info(
+            "Calibrated tactile offsets: force=%s distributed=%s",
+            {k: v.tolist() for k, v in offsets.items()},
+            distributed_summary,
+        )
         return offsets
 
     def reset_calibration(self) -> None:
         with self._lock:
             for name in SENSOR_NAMES:
                 self.offsets[name] = np.zeros(3, dtype=np.float32)
+                self.distributed_offsets[name] = None
 
     def save_snapshot_npz(self, path: str, snapshot: Optional[TactileSnapshot] = None) -> str:
         snapshot = snapshot or self.get_snapshot(copy_snapshot=True)
@@ -135,6 +189,14 @@ class TactileRuntime:
         for name in SENSOR_NAMES:
             payload[f"{name}_offset"] = snapshot.offsets[name]
             payload[f"{name}_calibrated_force"] = snapshot.calibrated_force[name]
+            distributed_offset = snapshot.distributed_offsets.get(name)
+            if distributed_offset is not None:
+                payload[f"{name}_distributed_offset"] = distributed_offset
+
+            calibrated_distributed = snapshot.calibrated_distributed.get(name)
+            if calibrated_distributed is not None:
+                payload[f"{name}_calibrated_distributed"] = calibrated_distributed
+
             sensor = snapshot.frame.sensors.get(name)
             if sensor is None:
                 continue
