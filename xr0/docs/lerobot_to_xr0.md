@@ -44,10 +44,20 @@ conda activate mibot
 pip install pyarrow imageio imageio-ffmpeg opencv-python-headless
 ```
 
-如果 `piper_sdk` 不在当前 Python 环境里，但在某个源码目录下，可以后面运行命令时加：
+如果 `piper_sdk` 不在当前 Python 环境里，但你手头有现成的 `piper_fk.py`，可以在运行命令时加 `--piper-sdk-root`。
+
+这个参数现在只会去找：
+
+- `piper_sdk/kinematics/piper_fk.py`
+- `kinematics/piper_fk.py`
+- `piper_fk.py`
+
+它不会再把整套别的环境 `site-packages` 插进当前 `sys.path`，所以不会再把 `pyarrow` 之类的包串到错误环境里。
+
+例如：
 
 ```bash
---piper-sdk-root /path/to/piper_sdk_parent
+--piper-sdk-root /home/enine/miniconda3/envs/SACM/lib/python3.10/site-packages
 ```
 
 ## 3. 最常用命令

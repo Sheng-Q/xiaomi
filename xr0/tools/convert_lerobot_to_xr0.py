@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -14,12 +15,48 @@ from typing import Any
 import numpy as np
 
 
-def add_sys_path(path: str | None) -> None:
-    if not path:
-        return
-    resolved = str(Path(path).expanduser().resolve())
-    if resolved not in sys.path:
-        sys.path.insert(0, resolved)
+def load_fk_class(piper_sdk_root: str | None):
+    candidates: list[Path] = []
+    if piper_sdk_root:
+        root = Path(piper_sdk_root).expanduser().resolve()
+        candidates.extend(
+            [
+                root / "piper_sdk" / "kinematics" / "piper_fk.py",
+                root / "kinematics" / "piper_fk.py",
+                root / "piper_fk.py",
+            ]
+        )
+
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location("_xr0_piper_fk", candidate)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Unable to load FK module spec from {candidate}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        fk_class = getattr(module, "C_PiperForwardKinematics", None)
+        if fk_class is None:
+            raise ImportError(f"{candidate} does not define C_PiperForwardKinematics")
+        return fk_class
+
+    try:
+        from piper_sdk.kinematics.piper_fk import C_PiperForwardKinematics
+    except ModuleNotFoundError as exc:
+        search_note = ""
+        if piper_sdk_root:
+            search_note = (
+                " Looked for piper_fk.py under: "
+                + ", ".join(str(path) for path in candidates)
+                + "."
+            )
+        raise ModuleNotFoundError(
+            "Unable to import piper_sdk forward kinematics. "
+            "Install piper_sdk in the current environment, or pass --piper-sdk-root "
+            "pointing to a directory that contains piper_sdk/kinematics/piper_fk.py."
+            + search_note
+        ) from exc
+    return C_PiperForwardKinematics
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,7 +134,10 @@ def parse_args() -> argparse.Namespace:
         "--piper-sdk-root",
         type=str,
         default=None,
-        help="Optional extra sys.path entry if piper_sdk is not already importable.",
+        help=(
+            "Optional path used to locate piper_sdk/kinematics/piper_fk.py directly. "
+            "This avoids mixing another environment's full site-packages into sys.path."
+        ),
     )
     return parser.parse_args()
 
@@ -583,14 +623,7 @@ def verify_episode_order_contiguous(assignments: list[int | None], closed_episod
 
 def main() -> None:
     args = parse_args()
-    add_sys_path(args.piper_sdk_root)
-
-    try:
-        from piper_sdk.kinematics.piper_fk import C_PiperForwardKinematics
-    except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError(
-            "Unable to import piper_sdk. Install it in the current environment, or pass --piper-sdk-root."
-        ) from exc
+    C_PiperForwardKinematics = load_fk_class(args.piper_sdk_root)
 
     try:
         import pyarrow.parquet as pq
