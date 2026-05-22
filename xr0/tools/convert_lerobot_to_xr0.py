@@ -15,6 +15,10 @@ from typing import Any
 import numpy as np
 
 
+def log(message: str) -> None:
+    print(message, flush=True)
+
+
 def load_fk_class(piper_sdk_root: str | None):
     candidates: list[Path] = []
     if piper_sdk_root:
@@ -605,6 +609,50 @@ def episode_json(
     }
 
 
+def write_episode_json(
+    record: EpisodeRecord,
+    *,
+    episode_rank: int,
+    total_episodes: int,
+    task_override: str | None,
+    task_map: dict[int, str],
+    fps: int,
+    output_root: Path,
+    xr0_root: Path,
+    video_ext: str,
+    trajectory_type: str,
+    absolute_video_paths: bool,
+    json_dir: Path,
+) -> Path:
+    for view, count in record.video_counts.items():
+        if count != record.num_frames:
+            raise ValueError(
+                f"Episode {record.episode_index} view {view} wrote {count} frames, expected {record.num_frames}"
+            )
+
+    task_text = resolve_task_text(task_override, task_map, record)
+    payload = episode_json(
+        record=record,
+        task=task_text,
+        fps=fps,
+        output_root=output_root,
+        xr0_root=xr0_root,
+        video_ext=video_ext,
+        trajectory_type=trajectory_type,
+        absolute_video_paths=absolute_video_paths,
+    )
+    json_path = json_dir / f"{output_episode_id(record.episode_index)}.json"
+    with json_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+    log(
+        f"[done] episode {episode_rank}/{total_episodes}: "
+        f"{output_episode_id(record.episode_index)} "
+        f"({record.num_frames} frames) -> {json_path}"
+    )
+    return json_path
+
+
 def verify_episode_order_contiguous(assignments: list[int | None], closed_episodes: set[int], last_episode: int | None) -> int | None:
     for episode_index in assignments:
         if episode_index is None:
@@ -664,6 +712,9 @@ def main() -> None:
 
     json_dir.mkdir(parents=True, exist_ok=True)
     videos_dir.mkdir(parents=True, exist_ok=True)
+    log(f"[init] dataset root: {lerobot_root}")
+    log(f"[init] output root: {output_root}")
+    log(f"[init] found {len(parquet_files)} parquet file(s)")
 
     selected_order: list[int] = []
     episode_records: dict[int, EpisodeRecord] = {}
@@ -671,7 +722,8 @@ def main() -> None:
     closed_episodes: set[int] = set()
     last_selected_episode: int | None = None
 
-    for parquet_path in parquet_files:
+    for parquet_index, parquet_path in enumerate(parquet_files, start=1):
+        log(f"[scan] parquet {parquet_index}/{len(parquet_files)}: {parquet_path}")
         available_columns = set(pq.read_schema(parquet_path).names)
         required_columns = ["episode_index", "observation.state", "action"]
         missing_columns = [column for column in required_columns if column not in available_columns]
@@ -741,19 +793,28 @@ def main() -> None:
 
         last_selected_episode = verify_episode_order_contiguous(assignments, closed_episodes, last_selected_episode)
         source_plans.append(SourceChunkPlan(parquet_path=parquet_path, assignments=assignments))
+        log(
+            f"[scan] finished parquet {parquet_index}/{len(parquet_files)}: "
+            f"{len(rows)} row(s), selected episodes so far {len(selected_order)}"
+        )
 
     if not selected_order:
         raise ValueError("No episodes matched the requested filters.")
+    total_episodes = len(selected_order)
+    episode_rank_map = {episode_index: rank for rank, episode_index in enumerate(selected_order, start=1)}
+    log(f"[scan] total selected episodes: {total_episodes}")
 
     current_episode: int | None = None
     current_sinks: EpisodeVideoSinks | None = None
+    created_json: list[Path] = []
     view_to_camera_key = {
         "ego": args.ego_camera_key,
         "wrist_left": args.left_wrist_camera_key,
         "wrist_right": args.right_wrist_camera_key,
     }
 
-    for plan in source_plans:
+    for plan_index, plan in enumerate(source_plans, start=1):
+        log(f"[video] source chunk {plan_index}/{len(source_plans)}: {plan.parquet_path}")
         source_videos = {
             view: source_video_path(lerobot_root, camera_key, plan.parquet_path)
             for view, camera_key in view_to_camera_key.items()
@@ -778,13 +839,33 @@ def main() -> None:
                     continue
 
                 if episode_index != current_episode:
-                    if current_sinks is not None:
+                    if current_sinks is not None and current_episode is not None:
                         current_sinks.close()
+                        created_json.append(
+                            write_episode_json(
+                                episode_records[current_episode],
+                                episode_rank=episode_rank_map[current_episode],
+                                total_episodes=total_episodes,
+                                task_override=args.task,
+                                task_map=task_map,
+                                fps=fps,
+                                output_root=output_root,
+                                xr0_root=xr0_root,
+                                video_ext=args.video_ext,
+                                trajectory_type=args.trajectory_type,
+                                absolute_video_paths=args.absolute_video_paths,
+                                json_dir=json_dir,
+                            )
+                        )
                     current_episode = episode_index
                     current_sinks = EpisodeVideoSinks(
                         paths=episode_video_paths(output_root, episode_index, args.video_ext),
                         fps=fps,
                         backend=writer_backend,
+                    )
+                    log(
+                        f"[video] writing episode {episode_rank_map[episode_index]}/{total_episodes}: "
+                        f"{output_episode_id(episode_index)}"
                     )
 
                 record = episode_records[episode_index]
@@ -806,41 +887,32 @@ def main() -> None:
                 if callable(close_fn):
                     close_fn()
 
-    if current_sinks is not None:
+    if current_sinks is not None and current_episode is not None:
         current_sinks.close()
-
-    created_json: list[Path] = []
-    for episode_index in selected_order:
-        record = episode_records[episode_index]
-        for view, count in record.video_counts.items():
-            if count != record.num_frames:
-                raise ValueError(
-                    f"Episode {episode_index} view {view} wrote {count} frames, expected {record.num_frames}"
-                )
-
-        task_text = resolve_task_text(args.task, task_map, record)
-        payload = episode_json(
-            record=record,
-            task=task_text,
-            fps=fps,
-            output_root=output_root,
-            xr0_root=xr0_root,
-            video_ext=args.video_ext,
-            trajectory_type=args.trajectory_type,
-            absolute_video_paths=args.absolute_video_paths,
+        created_json.append(
+            write_episode_json(
+                episode_records[current_episode],
+                episode_rank=episode_rank_map[current_episode],
+                total_episodes=total_episodes,
+                task_override=args.task,
+                task_map=task_map,
+                fps=fps,
+                output_root=output_root,
+                xr0_root=xr0_root,
+                video_ext=args.video_ext,
+                trajectory_type=args.trajectory_type,
+                absolute_video_paths=args.absolute_video_paths,
+                json_dir=json_dir,
+            )
         )
-        json_path = json_dir / f"{output_episode_id(episode_index)}.json"
-        with json_path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-        created_json.append(json_path)
 
-    print(f"Converted {len(created_json)} episode(s) from {lerobot_root}")
-    print(f"Output root: {output_root}")
-    print(f"JSON dir: {json_dir}")
-    print(f"Videos dir: {videos_dir}")
-    print(f"Video writer backend: {writer_backend}")
-    print(f"State layout: {state_layout}")
-    print(f"Action layout: {action_layout}")
+    log(f"[summary] converted {len(created_json)} episode(s) from {lerobot_root}")
+    log(f"[summary] output root: {output_root}")
+    log(f"[summary] JSON dir: {json_dir}")
+    log(f"[summary] videos dir: {videos_dir}")
+    log(f"[summary] video writer backend: {writer_backend}")
+    log(f"[summary] state layout: {state_layout}")
+    log(f"[summary] action layout: {action_layout}")
 
 
 if __name__ == "__main__":
